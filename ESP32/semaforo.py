@@ -38,4 +38,3 @@ class Semaforo: #Clase encargada de controlar el semaforo de entrada
 
 
 
-
