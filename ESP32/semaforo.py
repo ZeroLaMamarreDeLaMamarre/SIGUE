@@ -34,7 +34,3 @@ class Semaforo: #Clase encargada de controlar el semaforo de entrada
             self.leds["AMARILLO"].on()
         else: #Y si no es ni una ni otra se pende el verde
             self.leds["VERDE"].on()
-
-
-
-
