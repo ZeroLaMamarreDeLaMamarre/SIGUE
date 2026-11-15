@@ -20,8 +20,13 @@ class Bluetooth:
         if event == 1:
             print("Cliente BLE conectado.")
         elif event == 2:
-            print("Cliente BLE desconectado. Reiniciando publicidad...")
-            self._start_advertising()
+            print("Cliente BLE desconectado.")
+            # Evitamos reiniciar la publicidad si ya obtuvimos las credenciales
+            if not self.ssid or not self.password:
+                print("Reiniciando publicidad...")
+                self._start_advertising()
+            else:
+                print("Configuración finalizada. Omitiendo publicidad.")
         elif event == 3:
             conn_handle, value_handle = data
             if value_handle == self.rx_handle:
@@ -65,5 +70,14 @@ class Bluetooth:
         while not self.ssid or not self.password:
             time.sleep(0.2)  # Pausa breve para no saturar el procesador
 
+        print("¡Credenciales obtenidas con éxito!")
         return self.ssid, self.password
 
+    def apagar(self):
+        """Desactiva el Bluetooth y libera la radio del ESP32."""
+        try:
+            time.sleep(0.5)
+            self.ble.active(False)
+            print("Bluetooth apagado correctamente.")
+        except Exception as e:
+            print(f"❌ Error al apagar el Bluetooth: {e}")
