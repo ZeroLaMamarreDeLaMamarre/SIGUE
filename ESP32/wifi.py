@@ -1,5 +1,8 @@
+
 import network
 import time
+import ntptime
+import machine
 #Clase encargada de administrar la red wifi
 class WiFi:
     def __init__(self):
@@ -95,6 +98,28 @@ class WiFi:
             "ssid" : ssid,
             "rssid" : rssid
         }
+    def sincronizar_hora(self):
+        ntptime.host = "pool.ntp.org"
+        intento = 0
+
+        while intento < 5:
+            try:
+                ntptime.settime()
+                t = time.localtime(time.time() - 21600)
+                machine.RTC().datetime((t[0], t[1], t[2], t[6], t[3], t[4], t[5], 0))
+                print(f"Hora NTP sincronizada: {t[0]}-{t[1]:02d}-{t[2]:02d} {t[3]:02d}:{t[4]:02d}:{t[5]:02d} UTC")
+                return
+
+
+            except Exception:
+                intento += 1
+                print(f"Intento fallido intento: {intento}")
+                time.sleep(2)
+
+        raise RuntimeError("Fallo en validación TLS: No se obtuvo tiempo de referencia para verificar certificados.")
+
+
+
 
 
 
