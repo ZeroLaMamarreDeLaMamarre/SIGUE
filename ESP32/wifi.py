@@ -35,7 +35,6 @@ class WiFi:
 
 
 
-        print(f"Intentando conectar a {ssid}. . . ")
         self.wlan.connect(ssid, password) #Intentamos establecer conecion
 
         errores = { #Los posibles errores mas comunes que puede haber
