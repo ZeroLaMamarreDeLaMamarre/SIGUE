@@ -36,5 +36,4 @@ class NVS:
             self.nvs.commit()
             return True
         except Exception:
-            print("No se ha podido encontrar o eliminar la clave.")
             return False
