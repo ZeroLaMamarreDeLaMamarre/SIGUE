@@ -9,6 +9,7 @@ segundos sin datos, la UI entra sola en "Modo offline".
 
 import time
 import tkinter as tk
+from config_view import ConfigFrame
 
 N = 6
 OFFLINE_AFTER = 20  # segundos sin datos para pasar a modo offline
@@ -33,6 +34,7 @@ class App(tk.Tk):
         self.last_msg = None  # time.time() del último dato; None = aún no llega ninguno
         self.offline = True  # offline hasta recibir el primer dato
         self.eventos = []
+        self.vista_actual = "dashboard"
 
         self._build()
         self.refresh()
@@ -67,13 +69,50 @@ class App(tk.Tk):
         )
         self.badge.pack(side="right")
 
+        # Barra de navegación principal (Monitoreo vs Configuración)
+        nav_bar = tk.Frame(root, bg=BG)
+        nav_bar.pack(fill="x", pady=(16, 12))
+
+        self.btn_nav_dashboard = tk.Button(
+            nav_bar,
+            text="📊 Panel de Monitoreo",
+            font=(FONT, 11, "bold"),
+            relief="flat",
+            padx=18,
+            pady=7,
+            cursor="hand2",
+            highlightthickness=1,
+            command=lambda: self._cambiar_vista("dashboard"),
+        )
+        self.btn_nav_dashboard.pack(side="left", padx=(0, 10))
+
+        self.btn_nav_config = tk.Button(
+            nav_bar,
+            text="⚙️ Configuración (Wi-Fi · MQTT · Dispositivo)",
+            font=(FONT, 11, "bold"),
+            relief="flat",
+            padx=18,
+            pady=7,
+            cursor="hand2",
+            highlightthickness=1,
+            command=lambda: self._cambiar_vista("config"),
+        )
+        self.btn_nav_config.pack(side="left")
+
+        # Contenedor para alternar vistas
+        self.container = tk.Frame(root, bg=BG)
+        self.container.pack(fill="both", expand=True)
+
+        # 1. Vista de Monitoreo (Dashboard)
+        self.frame_dashboard = tk.Frame(self.container, bg=BG)
+
         # Banner (lleno / offline); se muestra u oculta en refresh()
         self.banner = tk.Label(
-            root, font=(FONT, 14, "bold"), anchor="w", padx=20, pady=14
+            self.frame_dashboard, font=(FONT, 14, "bold"), anchor="w", padx=20, pady=14
         )
 
         # Cuerpo
-        self.body = tk.Frame(root, bg=BG)
+        self.body = tk.Frame(self.frame_dashboard, bg=BG)
         self.body.pack(fill="both", expand=True, pady=(16, 0))
         self.body.columnconfigure(0, weight=1, uniform="c")
         self.body.columnconfigure(1, weight=2, uniform="c")
@@ -131,12 +170,91 @@ class App(tk.Tk):
         self.bar.bind("<Configure>", lambda e: self._draw_bar())
 
         # Pie: última actualización + eventos
-        foot = tk.Frame(root, bg=CARD, highlightthickness=1, highlightbackground=BORDER)
+        foot = tk.Frame(self.frame_dashboard, bg=CARD, highlightthickness=1, highlightbackground=BORDER)
         foot.pack(fill="x", pady=(16, 0))
         self.lbl_update = self._label(foot, "", 13, True)
         self.lbl_update.pack(anchor="w", padx=24, pady=(16, 4))
         self.lbl_events = self._label(foot, "", 11, False, MUTED)
         self.lbl_events.pack(anchor="w", padx=24, pady=(0, 16))
+
+        # 2. Vista de Configuración (3 pestañas: Wi-Fi, MQTT, Dispositivo)
+        self.config_view = ConfigFrame(self.container)
+
+        # Mostrar por defecto el Dashboard
+        self._cambiar_vista("dashboard")
+
+    def _cambiar_vista(self, vista):
+        self.vista_actual = vista
+        if vista == "dashboard":
+            self.config_view.pack_forget()
+            self.frame_dashboard.pack(fill="both", expand=True)
+            self.btn_nav_dashboard.config(
+                bg="#1E3A6B",
+                fg="#FFFFFF",
+                activebackground="#254B8C",
+                activeforeground="#FFFFFF",
+                highlightbackground=TEXT,
+            )
+            self.btn_nav_config.config(
+                bg=CARD,
+                fg=TEXT,
+                activebackground="#101F3B",
+                activeforeground="#FFFFFF",
+                highlightbackground=BORDER,
+            )
+        else:
+            self.frame_dashboard.pack_forget()
+            self.config_view.pack(fill="both", expand=True)
+            self.btn_nav_config.config(
+                bg="#1E3A6B",
+                fg="#FFFFFF",
+                activebackground="#254B8C",
+                activeforeground="#FFFFFF",
+                highlightbackground=TEXT,
+            )
+            self.btn_nav_dashboard.config(
+                bg=CARD,
+                fg=TEXT,
+                activebackground="#101F3B",
+                activeforeground="#FFFFFF",
+                highlightbackground=BORDER,
+            )
+
+    # Accesos directos a variables de configuración
+    @property
+    def ssid(self):
+        return self.config_view.ssid
+
+    @property
+    def password(self):
+        return self.config_view.password
+
+    @property
+    def mqtt_id(self):
+        return self.config_view.mqtt_id
+
+    @property
+    def mqtt_ip(self):
+        return self.config_view.mqtt_ip
+
+    @property
+    def mqtt_port(self):
+        return self.config_view.mqtt_port
+
+    @property
+    def mqtt_user(self):
+        return self.config_view.mqtt_user
+
+    @property
+    def mqtt_pass(self):
+        return self.config_view.mqtt_pass
+
+    @property
+    def nuevo_nombre(self):
+        return self.config_view.nuevo_nombre
+
+    def get_config(self):
+        return self.config_view.get_config()
 
     # ---------- API para el backend ----------
     def on_message(self, indice, ocupado):
