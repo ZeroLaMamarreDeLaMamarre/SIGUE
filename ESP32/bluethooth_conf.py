@@ -1,108 +1,195 @@
 import bluetooth
 import time
 
+MAX_CHARS = 30      # Máximo de caracteres por parámetro
+BUFFER_SIZE = 64    # Buffer por característica (mayor al máximo, por seguridad)
+MTU_SIZE = 64       # MTU solicitado (>= 33 para 30 caracteres)
+
+_IRQ_CENTRAL_CONNECT = 1
+_IRQ_CENTRAL_DISCONNECT = 2
+_IRQ_GATTS_WRITE = 3
+_IRQ_MTU_EXCHANGED = 21
+
+
 class Bluetooth:
-    def __init__(self, device_name="ESP32_Config"):
+
+    def __init__(self, device_name="Esp32-C0NF"):
         self.device_name = device_name
+
+        # Almacenamiento de variables
         self.ssid = None
         self.password = None
+
         self.mqtt_id = None
-        self.mqtt_ip = None
-        self.mqtt_port = None
+        self.mqtt_ip = None    # Por defecto 172.30.33.188
+        self.mqtt_port = None  # Por defecto 8883
         self.mqtt_user = None
         self.mqtt_pass = None
+
         self.nuevo_nombre = None
-        self.config_terminada = False
+
+        # Banderas de estado individuales
+        self.activo = True
+        self.wifi_ssid_listo = False
+        self.wifi_pass_listo = False
+        self.mqtt_id_listo = False
+        self.mqtt_ip_listo = False
+        self.mqtt_port_listo = False
+        self.mqtt_user_listo = False
+        self.mqtt_pass_listo = False
+        self.nombre_listo = False
+
+        # Inicialización del BLE
         self.ble = bluetooth.BLE()
+        # El MTU debe configurarse ANTES de activar el BLE
+        try:
+            self.ble.config(mtu=MTU_SIZE)
+        except Exception as e:
+            print("No se pudo configurar MTU:", e)
         self.ble.active(True)
-        self.ble.irq(self._ble_irq)
-        self._register_services()
+        self.ble.irq(self._irq_handler)
+        self._setup_services()
         self._start_advertising()
 
-    def _ble_irq(self, event, data):
-        if event == 1:
-            pass
-        elif event == 2:
-            if not self.config_terminada:
-                self._start_advertising()
-            else:
-                pass
-        elif event == 3:
-            conn_handle, value_handle = data
-            if value_handle == self.rx_wifi_handle:
-                buffer = self.ble.gatts_read(self.rx_wifi_handle)
-                try:
-                    texto = buffer.decode('utf-8').strip()
-                    if "," in texto:
-                        temp_ssid, temp_password = texto.split(",", 1)
-                        if temp_ssid and temp_password:
-                            self.ssid = temp_ssid
-                            self.password = temp_password
-                except Exception as e:
-                    pass
-            elif value_handle == self.rx_mqtt_handle:
-                buffer = self.ble.gatts_read(self.rx_mqtt_handle)
-                try:
-                    texto = buffer.decode('utf-8').strip()
-                    partes = texto.split(",")
-                    if len(partes) == 5:
-                        self.mqtt_id = partes[0]
-                        self.mqtt_ip = partes[1]
-                        self.mqtt_port = int(partes[2])
-                        self.mqtt_user = partes[3]
-                        self.mqtt_pass = partes[4]
-                except Exception as e:
-                    pass
-            elif value_handle == self.rx_name_handle:
-                buffer = self.ble.gatts_read(self.rx_name_handle)
-                try:
-                    texto = buffer.decode('utf-8').strip()
-                    if texto:
-                        self.nuevo_nombre = texto
-                except Exception as e:
-                    pass
+    def _irq_handler(self, event, data):
+        if not self.activo:
+            return
 
-    def _register_services(self):
+        if event == _IRQ_CENTRAL_CONNECT:
+            print("Cliente conectado")
+
+        elif event == _IRQ_CENTRAL_DISCONNECT:
+            print("Cliente desconectado")
+            # Volver a anunciar para poder reconectar
+            self._start_advertising()
+
+        elif event == _IRQ_MTU_EXCHANGED:
+            conn_handle, mtu = data
+            print("MTU negociado:", mtu)
+
+        elif event == _IRQ_GATTS_WRITE:
+            conn_handle, value_handle = data
+            try:
+                buffer = self.ble.gatts_read(value_handle)
+                if not buffer:
+                    return
+
+                texto = buffer.decode("utf-8").replace("\x00", "").strip()
+                # Quitar cualquier salto de línea por si el cliente lo envía
+                texto = texto.replace("\r", "").replace("\n", "")
+                if not texto:
+                    return
+
+                # Limitar a 30 caracteres
+                texto = texto[:MAX_CHARS]
+                print("Recibido (%d): %s" % (len(texto), texto))
+
+                if value_handle == self.h_ssid:
+                    self.ssid = texto
+                    self.wifi_ssid_listo = True
+                elif value_handle == self.h_pass:
+                    self.password = texto
+                    self.wifi_pass_listo = True
+                elif value_handle == self.h_mqtt_id:
+                    self.mqtt_id = texto
+                    self.mqtt_id_listo = True
+                elif value_handle == self.h_mqtt_ip:
+                    self.mqtt_ip = texto
+                    self.mqtt_ip_listo = True
+                elif value_handle == self.h_mqtt_port:
+                    self.mqtt_port = int(texto)
+                    self.mqtt_port_listo = True
+                elif value_handle == self.h_mqtt_user:
+                    self.mqtt_user = texto
+                    self.mqtt_user_listo = True
+                elif value_handle == self.h_mqtt_pass:
+                    self.mqtt_pass = texto
+                    self.mqtt_pass_listo = True
+                elif value_handle == self.h_name:
+                    self.nuevo_nombre = texto
+                    self.nombre_listo = True
+
+            except Exception as e:
+                print("Error en escritura BLE:", e)
+
+    def _setup_services(self):
         UART_UUID = bluetooth.UUID("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
-        RX_WIFI_UUID = bluetooth.UUID("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
-        RX_MQTT_UUID = bluetooth.UUID("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
-        RX_NAME_UUID = bluetooth.UUID("6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
+
+        UUID_SSID = bluetooth.UUID("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
+        UUID_PASS = bluetooth.UUID("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
+        UUID_MQTT_ID = bluetooth.UUID("6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
+        UUID_MQTT_IP = bluetooth.UUID("6E400005-B5A3-F393-E0A9-E50E24DCCA9E")
+        UUID_MQTT_PORT = bluetooth.UUID("6E400006-B5A3-F393-E0A9-E50E24DCCA9E")
+        UUID_MQTT_USER = bluetooth.UUID("6E400007-B5A3-F393-E0A9-E50E24DCCA9E")
+        UUID_MQTT_PASS = bluetooth.UUID("6E400008-B5A3-F393-E0A9-E50E24DCCA9E")
+        UUID_NAME = bluetooth.UUID("6E400009-B5A3-F393-E0A9-E50E24DCCA9E")
+
+        FLAGS = bluetooth.FLAG_WRITE | bluetooth.FLAG_WRITE_NO_RESPONSE
+
         SERVICES = (
             (
                 UART_UUID,
                 (
-                    (RX_WIFI_UUID, bluetooth.FLAG_WRITE | bluetooth.FLAG_WRITE_NO_RESPONSE),
-                    (RX_MQTT_UUID, bluetooth.FLAG_WRITE | bluetooth.FLAG_WRITE_NO_RESPONSE),
-                    (RX_NAME_UUID, bluetooth.FLAG_WRITE | bluetooth.FLAG_WRITE_NO_RESPONSE),
+                    (UUID_SSID, FLAGS),
+                    (UUID_PASS, FLAGS),
+                    (UUID_MQTT_ID, FLAGS),
+                    (UUID_MQTT_IP, FLAGS),
+                    (UUID_MQTT_PORT, FLAGS),
+                    (UUID_MQTT_USER, FLAGS),
+                    (UUID_MQTT_PASS, FLAGS),
+                    (UUID_NAME, FLAGS),
                 ),
             ),
         )
-        ((self.rx_wifi_handle, self.rx_mqtt_handle, self.rx_name_handle),) = self.ble.gatts_register_services(SERVICES)
+
+        handles = self.ble.gatts_register_services(SERVICES)
+        (
+            self.h_ssid,
+            self.h_pass,
+            self.h_mqtt_id,
+            self.h_mqtt_ip,
+            self.h_mqtt_port,
+            self.h_mqtt_user,
+            self.h_mqtt_pass,
+            self.h_name,
+        ) = handles[0]
+
+        # CLAVE: ampliar el buffer de cada característica (por defecto es 20 bytes)
+        for h in handles[0]:
+            self.ble.gatts_set_buffer(h, BUFFER_SIZE)
 
     def _start_advertising(self):
-        name_bytes = bytes(self.device_name, 'utf-8')
-        payload = bytes((len(name_bytes) + 1, 0x09)) + name_bytes
-        self.ble.gap_advertise(100000, payload)
-
-    def esperar_nombre(self):
-        while not self.nuevo_nombre:
-            time.sleep(0.2)
-        return self.nuevo_nombre
+        if not self.activo:
+            return
+        name_bytes = bytes(self.device_name, "utf-8")
+        payload = b"\x02\x01\x06" + bytes((len(name_bytes) + 1, 0x09)) + name_bytes
+        try:
+            self.ble.gap_advertise(100000, payload)
+        except Exception as e:
+            print("Error advertising:", e)
 
     def esperar_wifi(self):
-        while not self.ssid or not self.password:
-            time.sleep(0.2)
+        while (not self.wifi_ssid_listo or not self.wifi_pass_listo) and self.activo:
+            time.sleep(0.1)
         return self.ssid, self.password
 
     def esperar_mqtt(self):
-        while not all([self.mqtt_id, self.mqtt_ip, self.mqtt_port, self.mqtt_user, self.mqtt_pass]):
-            time.sleep(0.2)
-        self.config_terminada = True
+        while not (
+                self.mqtt_id_listo and self.mqtt_ip_listo and self.mqtt_port_listo
+                and self.mqtt_user_listo and self.mqtt_pass_listo) and self.activo:
+            time.sleep(0.1)
         return self.mqtt_id, self.mqtt_ip, self.mqtt_port, self.mqtt_user, self.mqtt_pass
+
+    def esperar_nombre(self):
+        while not self.nombre_listo and self.activo:
+            time.sleep(0.1)
+        return self.nuevo_nombre
 
     def apagar(self):
         try:
-            time.sleep(0.5)
+            self.activo = False
+            self.ble.irq(None)
+            time.sleep(0.2)
             self.ble.active(False)
-        except Exception as e:
+        except Exception:
             pass
