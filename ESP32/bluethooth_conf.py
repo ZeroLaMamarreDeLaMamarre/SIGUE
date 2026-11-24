@@ -1,9 +1,9 @@
 import bluetooth
 import time
 
-MAX_CHARS = 30      # Máximo de caracteres por parámetro
-BUFFER_SIZE = 64    # Buffer por característica (mayor al máximo, por seguridad)
-MTU_SIZE = 64       # MTU solicitado (>= 33 para 30 caracteres)
+MAX_CHARS = 30  # Máximo de caracteres por parámetro
+BUFFER_SIZE = 64  # Buffer por característica (mayor al máximo, por seguridad)
+MTU_SIZE = 64  # MTU solicitado (>= 33 para 30 caracteres)
 
 _IRQ_CENTRAL_CONNECT = 1
 _IRQ_CENTRAL_DISCONNECT = 2
@@ -21,7 +21,7 @@ class Bluetooth:
         self.password = None
 
         self.mqtt_id = None
-        self.mqtt_ip = None    # Por defecto 172.30.33.188
+        self.mqtt_ip = None  # Por defecto 172.30.33.188
         self.mqtt_port = None  # Por defecto 8883
         self.mqtt_user = None
         self.mqtt_pass = None
@@ -114,7 +114,6 @@ class Bluetooth:
 
     def _setup_services(self):
         UART_UUID = bluetooth.UUID("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
-
         UUID_SSID = bluetooth.UUID("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
         UUID_PASS = bluetooth.UUID("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
         UUID_MQTT_ID = bluetooth.UUID("6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -167,6 +166,14 @@ class Bluetooth:
             self.ble.gap_advertise(100000, payload)
         except Exception as e:
             print("Error advertising:", e)
+
+    def reiniciar_wifi(self):
+        """Limpia los datos de WiFi para no reutilizar credenciales viejas
+        (main.py lo llama tras un intento fallido)."""
+        self.ssid = None
+        self.password = None
+        self.wifi_ssid_listo = False
+        self.wifi_pass_listo = False
 
     def esperar_wifi(self):
         while (not self.wifi_ssid_listo or not self.wifi_pass_listo) and self.activo:
