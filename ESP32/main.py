@@ -7,6 +7,8 @@ from machine import reset
 from gestor_mqtt import MQTT
 import time
 import sys
+import json
+import binascii
 
 NOMBRE_CONFIG = "Esp32-C0NF"  # Nombre BLE durante la configuración
 NOMBRE = NOMBRE_CONFIG  # Nombre real del dispositivo (se carga desde NVS)
@@ -111,6 +113,12 @@ def iniciar_wifi():
 
         if resultado and "Conexión exitosa" in str(resultado):
             print("Conexión exitosa")
+            # El certificado del broker tiene fecha de validez: sin hora correcta
+            # (el ESP32 arranca en el año 2000) la verificación TLS falla.
+            try:
+                wifi.sincronizar_hora()
+            except Exception as e:
+                print("No se pudo sincronizar la hora (el TLS podría fallar):", e)
             break
 
         print("Fallo en conexión, esperando nuevas credenciales por bluetooth")
@@ -191,6 +199,71 @@ def restablecer_dispositivo():
 
 
 # ----------------------------------------------------------------------
+# Configuración remota por MQTT (comando "configurar")
+# ----------------------------------------------------------------------
+def comando_vigente(datos, tolerancia=120):
+    """Anti-repetición: el comando trae 'ts' (segundos Unix UTC de la PC) y solo vale
+    unos minutos. Si el reloj del ESP32 no está sincronizado no se puede comprobar."""
+    if time.localtime()[0] < 2024:
+        return True
+    ts = datos.get("ts")
+    if not isinstance(ts, int):
+        return False
+    ahora = time.time()
+    if time.gmtime(0)[0] == 2000:  # En el ESP32 time.time() cuenta desde el año 2000
+        ahora += 946684800
+    return abs(ahora - ts) <= tolerancia
+
+
+def restablecer_remoto(mqtt: MQTT):
+    """Borra wifi, mqtt y nombre de la NVS y reinicia: queda en modo configuración BLE."""
+    print("Restablecimiento remoto solicitado . . .")
+    mqtt.desconectar()  # Publica "offline" limpio antes de borrar
+    restablecer_dispositivo()
+    time.sleep(1)
+    reset()
+
+
+def aplicar_configuracion(mqtt: MQTT, datos: dict):
+    """Guarda en NVS lo recibido por el comando y reinicia.
+    Solo se escriben los campos presentes y no vacíos."""
+    wifi = datos.get("wifi") or {}
+    broker = datos.get("mqtt") or {}
+    disp = datos.get("dispositivo") or {}
+
+    try:
+        if broker.get("mqtt_port") is not None:
+            int(broker["mqtt_port"])
+    except (TypeError, ValueError):
+        print("Configuración rechazada: puerto MQTT inválido")
+        return
+
+    escrituras = [
+        (RUTA_WIFI, CLAVES_WIFI[0], wifi.get("ssid")),
+        (RUTA_WIFI, CLAVES_WIFI[1], wifi.get("password")),
+        (RUTA_MQTT, CLAVES_MQTT[0], broker.get("mqtt_id")),
+        (RUTA_MQTT, CLAVES_MQTT[1], broker.get("mqtt_ip")),
+        (RUTA_MQTT, CLAVES_MQTT[2], broker.get("mqtt_port")),
+        (RUTA_MQTT, CLAVES_MQTT[3], broker.get("mqtt_user")),
+        (RUTA_MQTT, CLAVES_MQTT[4], broker.get("mqtt_pass")),
+        (RUTA_DISPOSITIVO, CLAVES_DISPOSITIVO[0], disp.get("nuevo_nombre")),
+    ]
+
+    aplicadas = 0
+    for ruta, clave, valor in escrituras:
+        if valor is None or not str(valor).strip():
+            continue
+        NVS(ruta).guardar_cadena(clave, str(valor).strip())
+        aplicadas += 1
+
+    if aplicadas:
+        print(f"Configuración remota aplicada ({aplicadas} datos). Reiniciando . . .")
+        mqtt.desconectar()  # Publica "offline" limpio antes de reiniciar
+        time.sleep(1)
+        reset()
+
+
+# ----------------------------------------------------------------------
 # Estacionamiento
 # ----------------------------------------------------------------------
 def estacionamiento(mqtt: MQTT):
@@ -200,12 +273,41 @@ def estacionamiento(mqtt: MQTT):
     topico_estado = TOPICO_ESTADO.format(NOMBRE)
 
     def al_recibir_comando(topico, datos):
+        print("Comando recibido en", topico)
+        cifrado = False
+
+        # Un comando cifrado llega como texto base64: base64(IV + AES(JSON))
+        if isinstance(datos, str) and datos.strip().lower() != "estado":
+            try:
+                datos = json.loads(mqtt.cifrado.descifrar(binascii.a2b_base64(datos)))
+                cifrado = True
+            except Exception as e:
+                print("Comando ignorado (no se pudo descifrar):", e)
+                return
+
         # Acepta {"comando": "estado"} o el texto plano "estado"
         comando = datos.get("comando") if isinstance(datos, dict) else datos
-        if str(comando).strip().lower() == "estado":
+        comando = str(comando).strip().lower()
+
+        if comando == "estado":
             mqtt.publicar_trama(topico_estado, estacionamiento.resumen(), cifrar=CIFRAR_ESTADO)
+        elif comando in ("configurar", "restablecer"):
+            # Comandos que modifican el equipo: SOLO si llegaron cifrados y vigentes
+            if not (cifrado and isinstance(datos, dict)):
+                print(f"Comando '{comando}' ignorado: debe llegar cifrado")
+                return
+            if not comando_vigente(datos):
+                print(f"Comando '{comando}' ignorado: fuera de vigencia (reloj de la PC?)")
+                return
+            if comando == "configurar":
+                aplicar_configuracion(mqtt, datos)
+            else:
+                restablecer_remoto(mqtt)
+        else:
+            print("Comando desconocido:", comando)
 
     mqtt.suscribir_trama(topico_comandos, al_recibir_comando)
+    print(f"Escuchando comandos en [{topico_comandos}] · respondiendo en [{topico_estado}]")
 
     ocupados_anterior = -1
     while True:
