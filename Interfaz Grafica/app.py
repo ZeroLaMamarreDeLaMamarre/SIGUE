@@ -1,17 +1,20 @@
 """
 Dashboard de estacionamiento IoT (6 espacios) - tkinter.
 
-Solo interfaz: no genera datos. El backend debe llamar a
-    app.on_message(indice, ocupado)      # indice 0..5, ocupado True/False
-cada vez que llegue un dato (MQTT, serial, HTTP...). Si pasan OFFLINE_AFTER
-segundos sin datos, la UI entra sola en "Modo offline".
+Vistas en la barra superior:
+  1. 📊 Panel de Monitoreo
+  2. ⚙️ Configuración Dispositivo (4 pestañas: Wi-Fi, MQTT, Dispositivo, Enviar Datos)
+  3. 🖥️ Configuración del Panel (MQTT de la App + Guardar y Conectar)
 """
 
+import queue
 import time
 import tkinter as tk
-from config_view import ConfigFrame
+from config_view import AppConfigFrame, ConfigFrame
+from mqtt_panel import PanelMQTT
 
 N = 6
+AUTOCONECTAR = True  # conecta el panel al abrir si hay datos guardados
 OFFLINE_AFTER = 20  # segundos sin datos para pasar a modo offline
 
 BG, CARD, BORDER = "#01040B", "#030A19", "#192A4C"
@@ -23,12 +26,20 @@ FONT = "Helvetica"
 
 
 class App(tk.Tk):
-    def __init__(self):
+    def __init__(self, on_send_esp32=None, on_connect_app=None):
         super().__init__()
         self.title("Estacionamiento IoT")
         self.configure(bg=BG)
-        self.geometry("1100x740")
-        self.minsize(900, 660)
+        self.geometry("1100x760")
+        self.minsize(920, 680)
+
+        self.on_send_esp32 = on_send_esp32
+        self.on_connect_app = on_connect_app
+        self._cola = queue.Queue()  # hilo de paho -> hilo de tkinter
+        self.panel_mqtt = PanelMQTT(
+            on_estado=self._estado_panel_mqtt, on_datos=self._recibir_estado
+        )
+        self.protocol("WM_DELETE_WINDOW", self._cerrar)
 
         self.occ = [False] * N
         self.last_msg = None  # time.time() del último dato; None = aún no llega ninguno
@@ -39,6 +50,9 @@ class App(tk.Tk):
         self._build()
         self.refresh()
         self._tick()
+        self._drenar_cola()
+        if AUTOCONECTAR:
+            self.after(500, self.app_config_view.autoconectar)
 
     # ---------- UI ----------
     def _label(self, parent, text="", size=12, bold=False, color=TEXT):
@@ -69,7 +83,7 @@ class App(tk.Tk):
         )
         self.badge.pack(side="right")
 
-        # Barra de navegación principal (Monitoreo vs Configuración)
+        # Barra de navegación principal (3 opciones)
         nav_bar = tk.Frame(root, bg=BG)
         nav_bar.pack(fill="x", pady=(16, 12))
 
@@ -88,7 +102,7 @@ class App(tk.Tk):
 
         self.btn_nav_config = tk.Button(
             nav_bar,
-            text="⚙️ Configuración (Wi-Fi · MQTT · Dispositivo)",
+            text="⚙️ Configuración Dispositivo (ESP32)",
             font=(FONT, 11, "bold"),
             relief="flat",
             padx=18,
@@ -97,7 +111,20 @@ class App(tk.Tk):
             highlightthickness=1,
             command=lambda: self._cambiar_vista("config"),
         )
-        self.btn_nav_config.pack(side="left")
+        self.btn_nav_config.pack(side="left", padx=(0, 10))
+
+        self.btn_nav_app_config = tk.Button(
+            nav_bar,
+            text="🖥️ Configuración del Panel",
+            font=(FONT, 11, "bold"),
+            relief="flat",
+            padx=18,
+            pady=7,
+            cursor="hand2",
+            highlightthickness=1,
+            command=lambda: self._cambiar_vista("app_config"),
+        )
+        self.btn_nav_app_config.pack(side="left")
 
         # Contenedor para alternar vistas
         self.container = tk.Frame(root, bg=BG)
@@ -177,84 +204,115 @@ class App(tk.Tk):
         self.lbl_events = self._label(foot, "", 11, False, MUTED)
         self.lbl_events.pack(anchor="w", padx=24, pady=(0, 16))
 
-        # 2. Vista de Configuración (3 pestañas: Wi-Fi, MQTT, Dispositivo)
-        self.config_view = ConfigFrame(self.container)
+        # 2. Vista de Configuración del ESP32 (4 pestañas)
+        self.config_view = ConfigFrame(
+            self.container,
+            on_send_callback=self.on_send_esp32,
+            on_send_mqtt_callback=self._enviar_config_mqtt,
+            on_restablecer_callback=self._restablecer_esp32,
+        )
+
+        # 3. Vista de Configuración del Panel / App (MQTT + Guardar y Conectar)
+        self.app_config_view = AppConfigFrame(
+            self.container, on_connect_callback=self._conectar_panel
+        )
 
         # Mostrar por defecto el Dashboard
         self._cambiar_vista("dashboard")
 
+    # ---------- MQTT del panel ----------
+    def _conectar_panel(self, datos_mqtt_app):
+        self.panel_mqtt.conectar(datos_mqtt_app)
+        if self.on_connect_app:
+            self.on_connect_app(datos_mqtt_app)
+
+    def _estado_panel_mqtt(self, ok, texto):
+        # Lo llama paho desde su hilo; set_estado es seguro entre hilos
+        self.app_config_view.set_estado(ok, texto)
+
+    def _enviar_config_mqtt(self, diccionarios, destino, on_fin):
+        self.panel_mqtt.enviar_config(destino, diccionarios, on_fin)
+
+    def _restablecer_esp32(self, destino, on_fin):
+        self.panel_mqtt.enviar_comando(destino, {"comando": "restablecer"}, on_fin)
+
+    def _recibir_estado(self, resumen):
+        # Lo llama paho desde su hilo: se encola y se aplica en el hilo de tkinter
+        self._cola.put(lambda: self.on_estado_esp32(resumen))
+
+    def _drenar_cola(self):
+        try:
+            while True:
+                self._cola.get_nowait()()
+        except queue.Empty:
+            pass
+        self.after(100, self._drenar_cola)
+
+    def on_estado_esp32(self, resumen):
+        """resumen = JSON ya descifrado del ESP32: {"espacios": {"1,1": 0/1, ...}, ...}
+        Sensor (fila, columna) -> índice: (fila-1)*3 + (columna-1)."""
+        nuevos = [False] * N
+        for clave, valor in resumen.get("espacios", {}).items():
+            fila, col = (int(x) for x in clave.split(","))
+            idx = (fila - 1) * 3 + (col - 1)
+            if 0 <= idx < N:
+                nuevos[idx] = bool(valor)
+
+        if self.last_msg is not None:  # el primer dato no genera eventos
+            hora = time.strftime("%H:%M")
+            for i, (antes, ahora) in enumerate(zip(self.occ, nuevos)):
+                if antes != ahora:
+                    self.eventos.insert(
+                        0, f"{hora} · P{i + 1} {'ocupado' if ahora else 'libre'}"
+                    )
+            self.eventos = self.eventos[:3]
+
+        self.occ = nuevos
+        self.last_msg = time.time()
+        self.offline = False
+        self.refresh()
+
+    def _cerrar(self):
+        self.panel_mqtt.desconectar()
+        self.destroy()
+
     def _cambiar_vista(self, vista):
         self.vista_actual = vista
-        if vista == "dashboard":
-            self.config_view.pack_forget()
-            self.frame_dashboard.pack(fill="both", expand=True)
-            self.btn_nav_dashboard.config(
-                bg="#1E3A6B",
-                fg="#FFFFFF",
-                activebackground="#254B8C",
-                activeforeground="#FFFFFF",
-                highlightbackground=TEXT,
-            )
-            self.btn_nav_config.config(
-                bg=CARD,
-                fg=TEXT,
-                activebackground="#101F3B",
-                activeforeground="#FFFFFF",
-                highlightbackground=BORDER,
-            )
-        else:
-            self.frame_dashboard.pack_forget()
-            self.config_view.pack(fill="both", expand=True)
-            self.btn_nav_config.config(
-                bg="#1E3A6B",
-                fg="#FFFFFF",
-                activebackground="#254B8C",
-                activeforeground="#FFFFFF",
-                highlightbackground=TEXT,
-            )
-            self.btn_nav_dashboard.config(
-                bg=CARD,
-                fg=TEXT,
-                activebackground="#101F3B",
-                activeforeground="#FFFFFF",
-                highlightbackground=BORDER,
-            )
 
-    # Accesos directos a variables de configuración
-    @property
-    def ssid(self):
-        return self.config_view.ssid
+        vistas = {
+            "dashboard": (self.frame_dashboard, self.btn_nav_dashboard),
+            "config": (self.config_view, self.btn_nav_config),
+            "app_config": (self.app_config_view, self.btn_nav_app_config),
+        }
 
-    @property
-    def password(self):
-        return self.config_view.password
+        for key, (frame, btn) in vistas.items():
+            if key == vista:
+                frame.pack(fill="both", expand=True)
+                btn.config(
+                    bg="#1E3A6B",
+                    fg="#FFFFFF",
+                    activebackground="#254B8C",
+                    activeforeground="#FFFFFF",
+                    highlightbackground=TEXT,
+                )
+            else:
+                frame.pack_forget()
+                btn.config(
+                    bg=CARD,
+                    fg=TEXT,
+                    activebackground="#101F3B",
+                    activeforeground="#FFFFFF",
+                    highlightbackground=BORDER,
+                )
 
-    @property
-    def mqtt_id(self):
-        return self.config_view.mqtt_id
+    # Accesos directos a diccionarios de configuración
+    def get_config_esp32_por_pestana(self):
+        """Retorna {'wifi': {...}, 'mqtt': {...}, 'dispositivo': {...}}."""
+        return self.config_view.get_config_por_pestana()
 
-    @property
-    def mqtt_ip(self):
-        return self.config_view.mqtt_ip
-
-    @property
-    def mqtt_port(self):
-        return self.config_view.mqtt_port
-
-    @property
-    def mqtt_user(self):
-        return self.config_view.mqtt_user
-
-    @property
-    def mqtt_pass(self):
-        return self.config_view.mqtt_pass
-
-    @property
-    def nuevo_nombre(self):
-        return self.config_view.nuevo_nombre
-
-    def get_config(self):
-        return self.config_view.get_config()
+    def get_config_panel(self):
+        """Retorna el diccionario MQTT propio de la App."""
+        return self.app_config_view.get_config()
 
     # ---------- API para el backend ----------
     def on_message(self, indice, ocupado):
@@ -303,7 +361,7 @@ class App(tk.Tk):
     # ---------- Dibujo ----------
     def refresh(self):
         used, pct, color, estado = self._estado()
-        dim = self.offline  # en offline se muestra el "último dato conocido"
+        dim = self.offline
 
         if self.offline:
             self.badge.config(
@@ -399,5 +457,6 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
+    # El envío por BLE y por MQTT ya está integrado; los callbacks son opcionales.
     app = App()
     app.mainloop()
